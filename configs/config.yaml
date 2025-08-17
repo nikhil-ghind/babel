@@ -1,0 +1,21 @@
+store_path: data/store
+
+# Cohere models
+embed_model: embed-multilingual-v3.0
+rerank_model: rerank-multilingual-v3.0
+command_model: command-r-plus
+expansion_model: command-r
+
+# Ingestion
+chunk_max_tokens: 256
+chunk_overlap_tokens: 48
+min_words: 30
+allowed_languages: null        # null = keep every detected language
+
+# Retrieval
+candidate_k: 20
+rerank_top_n: 5
+n_expansions: 3
+
+# Agent
+max_iterations: 3
