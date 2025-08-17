@@ -49,25 +49,68 @@ COHERE_API_KEY=... docker compose up --build
 
 ## Architecture
 
-```
-Ingestion:  crawl_web / crawl_directory
-    → filter_documents (lang + quality + dedup)
-    → chunk_documents (semantic, overlapping)
-    → Cohere Embed (multilingual) → HybridStore (dense + BM25)
+```mermaid
+flowchart TB
+    subgraph ingest["Ingestion (src/ingestion)"]
+        CRAWL["crawler.py<br/>crawl_web BFS / crawl_directory"]
+        FILT["filters.py<br/>language allow-list, min length,<br/>exact + shingle-Jaccard dedup"]
+        CHUNK["chunker.py<br/>sentence-aware, token-bounded, overlapping"]
+        EMBD["cohere_embed.py<br/>embed-multilingual-v3.0, search_document"]
+    end
 
-Query-time (LangGraph agent):
-    START → retrieve ─────────────────────────────┐
-              rewrite + multi-query expansion      │
-              dense (cosine) + BM25 → RRF fusion    │
-              Cohere Rerank (cross-encoder) → top-n │
-          → generate (grounded Command + citations) │
-          → grade (PASS/FAIL self-critique)         │
-              ├─ FAIL & retries left → rewrite ──────┘
-              └─ PASS or budget hit → END
+    STORE[("HybridStore (src/vectorstore/store.py)<br/>NumPy dense matrix + BM25 index<br/>persisted together")]
 
-Observability:  LangFuse traces every run + scores faithfulness/relevance
-Offline eval:   LangSmith dataset runs with custom evaluators
+    subgraph retr["Retrieval funnel (src/retrieval)"]
+        REW["query_expansion.py<br/>rewrite_query then expand_query"]
+        DENSE["store.dense_search<br/>cosine over normalised vectors"]
+        SPARSE["store.sparse_search<br/>BM25"]
+        RRF["hybrid.py<br/>reciprocal_rank_fusion, k=60"]
+        RR["rerank.py<br/>rerank-multilingual-v3.0 cross-encoder"]
+    end
+
+    subgraph ag["LangGraph agent (src/agents/rag_agent.py)"]
+        RETN["retrieve node"]
+        GENN["generate node<br/>grounded.py, Command + citations"]
+        GRADE["grade node<br/>PASS / FAIL self-critique"]
+        REWN["rewrite node"]
+    end
+
+    subgraph apis["FastAPI (api/main.py)"]
+        Q["POST /query"]
+        I["POST /ingest<br/>BackgroundTasks"]
+        H["GET /health"]
+    end
+
+    EVAL["src/evaluation<br/>LangFuse online traces + scores<br/>LangSmith offline dataset runs"]
+
+    I --> CRAWL --> FILT --> CHUNK --> EMBD --> STORE
+    Q --> RETN
+    RETN --> REW
+    REW -->|"4 query variants"| DENSE
+    REW --> SPARSE
+    STORE --> DENSE
+    STORE --> SPARSE
+    DENSE --> RRF
+    SPARSE --> RRF
+    RRF -->|"~20 candidates"| RR
+    RR -->|"top_n = 5"| GENN
+    GENN --> GRADE
+    GRADE -->|"FAIL and iterations &lt; max"| REWN
+    REWN --> RETN
+    GRADE -->|"PASS or budget exhausted"| ANS["Grounded answer<br/>with inline citations"]
+    ANS --> Q
+    GENN -.-> EVAL
+    GRADE -.-> EVAL
 ```
+
+<img src="docs/retrieval-funnel.svg" alt="One question fanning out to four rewritten queries, running through the dense and BM25 indexes, fusing with RRF into about twenty candidates, reranking down to five passages, and looping back when the grader fails the answer" width="880">
+
+The funnel is where the interesting work happens: `retrieve()` rewrites the
+question, expands it into several variants, runs each variant through **both**
+indexes, fuses all those rankings with RRF, and only then pays for a
+cross-encoder pass over the surviving candidates. The agent wraps that funnel in
+a loop bounded by `max_iterations` (default 3), so a failed grade costs at most
+two extra retrieval rounds.
 
 ## Project Structure
 
