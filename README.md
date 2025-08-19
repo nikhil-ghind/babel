@@ -95,7 +95,7 @@ flowchart TB
     RRF -->|"~20 candidates"| RR
     RR -->|"top_n = 5"| GENN
     GENN --> GRADE
-    GRADE -->|"FAIL and iterations &lt; max"| REWN
+    GRADE -->|"FAIL and retries remain"| REWN
     REWN --> RETN
     GRADE -->|"PASS or budget exhausted"| ANS["Grounded answer<br/>with inline citations"]
     ANS --> Q
